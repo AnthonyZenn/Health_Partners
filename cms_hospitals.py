@@ -35,14 +35,14 @@ def to_snake_case(col_name):
     return slugify(col_name, separator="_")
 
 def download_and_process(dataset):
-    """Download CSV from CMS directly into Spark and process"""
+    """Download CSV into Spark directly and process"""
     dataset_name = dataset.get("identifier", dataset.get("title", "unknown_dataset"))
     distributions = dataset.get("distribution", [])
     if not distributions:
         print(f"Skipping {dataset_name}: no distributions found.")
         return
 
-    # Take the first download URL that is CSV
+    # Pick first CSV download URL
     dataset_url = None
     for dist in distributions:
         if dist.get("mediaType") == "text/csv" and dist.get("downloadURL"):
@@ -54,9 +54,9 @@ def download_and_process(dataset):
         return
 
     last_modified = dataset.get("modified")  # e.g., "2025-10-14"
-    output_path = os.path.join(DATA_DIR, f"{dataset_name}.csv")
+    output_path = os.path.join(DATA_DIR, dataset_name.replace(" ", "_"))
 
-    # Skip if not modified since last run
+    # Skip if not modified
     if dataset_name in metadata["files"] and metadata["files"][dataset_name] == last_modified:
         print(f"Skipping {dataset_name}, not modified since last run.")
         return
@@ -75,7 +75,7 @@ def download_and_process(dataset):
     for c in df.columns:
         df = df.withColumnRenamed(c, to_snake_case(c))
 
-    # Save CSV
+    # Save CSV locally
     df.coalesce(1).write.mode("overwrite").option("header", True).csv(output_path)
     print(f"Saved processed dataset to {output_path}")
 
@@ -86,22 +86,23 @@ def download_and_process(dataset):
 # MAIN JOB
 # --------------------
 if __name__ == "__main__":
-    # Initialize Spark
+    # Initialize Spark in local mode
     spark = SparkSession.builder \
         .appName("CMS Hospitals Data Job") \
+        .master("local[*]") \   # <-- local execution on all cores
         .getOrCreate()
 
     metadata = load_metadata()
     last_run = metadata.get("last_run")
     print(f"Last run: {last_run}")
 
-    # 1. Fetch datasets from CMS metastore
+    # Fetch datasets from CMS
     print("Fetching datasets from CMS metastore...")
     response = requests.get(CMS_METASTORE_URL)
     response.raise_for_status()
     all_datasets = response.json()  # list of dataset metadata
 
-    # 2. Filter for theme "Hospitals" (theme is a list)
+    # Filter datasets for theme "Hospitals" (theme is a list)
     hospital_datasets = [
         d for d in all_datasets
         if "theme" in d and isinstance(d["theme"], list) and "Hospitals" in d["theme"]
@@ -109,11 +110,11 @@ if __name__ == "__main__":
 
     print(f"Found {len(hospital_datasets)} hospital datasets to process.")
 
-    # 3. Download & process in parallel
+    # Download & process in parallel
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         executor.map(download_and_process, hospital_datasets)
 
-    # 4. Update last run timestamp
+    # Update last run timestamp
     metadata["last_run"] = datetime.utcnow().isoformat()
     save_metadata(metadata)
 
