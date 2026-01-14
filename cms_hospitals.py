@@ -10,7 +10,7 @@ from pyspark.sql import SparkSession
 # --------------------
 # CONFIG
 # --------------------
-CMS_METASTORE_URL = "https://example.com/api/datasets"  # Replace with actual CMS provider API
+CMS_METASTORE_URL = "https://data.cms.gov/provider-data/api/1/metastore/schemas/dataset/items"
 DATA_DIR = "data"
 METADATA_FILE = "metadata.json"
 MAX_WORKERS = 5  # parallel downloads
@@ -35,20 +35,34 @@ def to_snake_case(col_name):
     return slugify(col_name, separator="_")
 
 def download_and_process(dataset):
-    """Download CSV content into Spark directly and process"""
-    dataset_name = dataset["name"]
-    dataset_url = dataset["url"]
-    last_modified = dataset["last_modified"]
+    """Download CSV from CMS directly into Spark and process"""
+    dataset_name = dataset.get("identifier", dataset.get("title", "unknown_dataset"))
+    distributions = dataset.get("distribution", [])
+    if not distributions:
+        print(f"Skipping {dataset_name}: no distributions found.")
+        return
 
+    # Take the first download URL that is CSV
+    dataset_url = None
+    for dist in distributions:
+        if dist.get("mediaType") == "text/csv" and dist.get("downloadURL"):
+            dataset_url = dist["downloadURL"]
+            break
+
+    if not dataset_url:
+        print(f"Skipping {dataset_name}: no CSV download URL found.")
+        return
+
+    last_modified = dataset.get("modified")  # e.g., "2025-10-14"
     output_path = os.path.join(DATA_DIR, f"{dataset_name}.csv")
 
-    # Skip if not modified
+    # Skip if not modified since last run
     if dataset_name in metadata["files"] and metadata["files"][dataset_name] == last_modified:
         print(f"Skipping {dataset_name}, not modified since last run.")
         return
 
     # Download CSV content
-    print(f"Downloading {dataset_name}...")
+    print(f"Downloading {dataset_name} from {dataset_url} ...")
     resp = requests.get(dataset_url)
     resp.raise_for_status()
     csv_content = resp.text
@@ -85,10 +99,15 @@ if __name__ == "__main__":
     print("Fetching datasets from CMS metastore...")
     response = requests.get(CMS_METASTORE_URL)
     response.raise_for_status()
-    all_datasets = response.json()  # [{"name": ..., "url": ..., "theme": ..., "last_modified": ...}, ...]
+    all_datasets = response.json()  # list of dataset metadata
 
-    # 2. Filter for theme "Hospitals"
-    hospital_datasets = [d for d in all_datasets if d.get("theme") == "Hospitals"]
+    # 2. Filter for theme "Hospitals" (theme is a list)
+    hospital_datasets = [
+        d for d in all_datasets
+        if "theme" in d and isinstance(d["theme"], list) and "Hospitals" in d["theme"]
+    ]
+
+    print(f"Found {len(hospital_datasets)} hospital datasets to process.")
 
     # 3. Download & process in parallel
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
